@@ -15,3 +15,7 @@ logs/
 .venv/
 data/
 playwright/.auth/
+
+# IDE settings and the original downloaded archive
+.idea/
+/wxread-main.zip
