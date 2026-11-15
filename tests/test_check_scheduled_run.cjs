@@ -57,13 +57,16 @@ async function main() {
   runs = [run(1, 'schedule', 'completed', 'failure', 8)];
   assert.equal((await client.checkScheduledRun()).kind, 'rerun', 'a failed schedule run is retried');
 
-  // 只有手动运行成功，定时任务本身没成功 → 仍然补跑。
-  runs = [run(1, 'schedule', 'completed', 'failure', 8), run(2, 'workflow_dispatch', 'completed', 'success', 2)];
-  assert.equal((await client.checkScheduledRun()).kind, 'rerun', 'manual success does not count for the schedule');
-
   // 仍有任务在排队或运行 → 等待，不重复触发。
   runs = [run(1, 'schedule', 'completed', 'failure', 8), run(2, 'workflow_dispatch', 'in_progress', null, 1)];
   assert.equal((await client.checkScheduledRun()).kind, 'running', 'never rerun while another job is active');
+
+  // 定时失败但白天手动跑成功 → 时长已刷上，判为 skipped 且不再补跑。
+  const beforeSkip = dispatched;
+  runs = [run(1, 'schedule', 'completed', 'failure', 8), run(2, 'workflow_dispatch', 'completed', 'success', 2)];
+  info = await client.checkScheduledRun();
+  assert.equal(info.kind, 'skipped', 'a manual success in the same cycle suppresses the rerun');
+  assert.equal(dispatched, beforeSkip, 'skipped outcome must not dispatch a new run');
 
   // 定时时间刚过不到半小时 → 给 GitHub 排队留出时间。
   clock = Date.UTC(2026, 10, 15, 19, 40);

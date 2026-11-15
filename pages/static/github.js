@@ -1,7 +1,7 @@
 /* GitHub-only control plane. Browser credential storage requires explicit opt-in. */
 'use strict';
 class GitHubClient {
-  constructor() { this.token='';this.repository='';this.branch='';this.pair=null;this.clientId='';this.commands=new Map();this.data=null;this.pendingReading=null;this.sessionVersion=0;this.retryAt=0;this.remember=false;this.sessionExpires=0;this.registeredAt=0;this.renewal=null;this.storageKind='session';this.requestCache=new Map();this.inflight=new Map();this.requestQueue=Promise.resolve(); }
+  constructor() { this.token='';this.repository='';this.branch='';this.pair=null;this.clientId='';this.commands=new Map();this.data=null;this.pendingReading=null;this.sessionVersion=0;this.retryAt=0;this.remember=false;this.sessionExpires=0;this.registeredAt=0;this.renewal=null;this.storageKind='session';this.requestCache=new Map();this.inflight=new Map();this.requestQueue=Promise.resolve();this.watchdogCache=null; }
   get connected() {return Boolean(this.token && this.pair && this.branch);}
   id() {return crypto.randomUUID().replaceAll('-','');}
   b64(value) {return sodium.to_base64(value,sodium.base64_variants.ORIGINAL);}
@@ -257,6 +257,48 @@ class GitHubClient {
     return null;
   }
   // 判定最近一个定时窗口内 Actions 是否运行成功；未成功则立刻手动触发一次补跑。
+  // 自动检测时间保存在 watchdog.yml 的 schedule 块里；关闭时整块注释，避免留下空的 schedule 使文件不合法。
+  readWatchdogText(text, sha) {
+    const open = text.match(/^([ \t]*)schedule:[ \t]*\n[ \t]*-[ \t]*cron:\s*'([^']+)'/m);
+    const closed = text.match(/^([ \t]*)#[ \t]*schedule:[ \t]*\n[ \t]*#[ \t]*-[ \t]*cron:\s*'([^']+)'/m);
+    const match = open || closed;
+    if (!match) throw this.error('未能识别检测时间配置，请确认 watchdog.yml 中 schedule 与 cron 的写法', 'CONFIGURATION');
+    const [, , cron] = match;
+    const [minute = '0', hour = '0'] = cron.trim().split(/\s+/);
+    // 仓库里按 UTC 保存，界面按北京时间展示，读取时加上 8 小时。
+    return {enabled: Boolean(open), utcCron: cron, hour: ((Number(hour) || 0) + 8) % 24, minute: Number(minute) || 0, file: sha, text};
+  }
+  async fetchWatchdog() {
+    const result = await this.request('/contents/.github/workflows/watchdog.yml?ref=' + encodeURIComponent(this.branch || 'main'));
+    return this.readWatchdogText(sodium.to_string(this.bytes(result.content.replace(/\s/g, ''))), result.sha);
+  }
+  async loadWatchdog(force = false) {
+    if (this.watchdogCache && !force) return this.watchdogCache;
+    return this.watchdogCache = await this.fetchWatchdog();
+  }
+  // 北京时间转 UTC：GitHub 的 schedule 按 UTC 执行，减去 8 小时并绕回 0-23。
+  toUtcCron(hour, minute) {return `${Number(minute) || 0} ${(((Number(hour) || 0) - 8) + 24) % 24} * * *`;}
+  writeWatchdog(text, values) {
+    const cron = this.toUtcCron(values.hour, values.minute);
+    const time = `${String(values.hour).padStart(2, '0')}:${String(values.minute).padStart(2, '0')}`;
+    const block = values.enabled ? `  schedule:\n    - cron: '${cron}'` : `  # schedule:\n  #   - cron: '${cron}'`;
+    const pattern = /^([ \t]*)#?[ \t]*schedule:[ \t]*\n[ \t]*#?[ \t]*-[ \t]*cron:\s*'[^']*'[ \t]*$/m;
+    // 先确认定时块存在再替换：配置被人改坏时放弃保存，不写坏工作流文件。
+    if (!pattern.test(text)) throw this.error('未能定位检测时间配置，已放弃保存以免损坏工作流文件', 'CONFIGURATION');
+    const next = text.replace(pattern, block);
+    return next.replace(/^([^\S\n]*)# 自动检查时间[^\n]*$/m, `$1# 自动检查时间：${values.enabled ? `每天北京时间 ${time}` : '已关闭'}（cron 按 UTC 执行，北京时间 = UTC + 8）。`);
+  }
+  async saveWatchdog(values) {
+    const current = await this.fetchWatchdog();
+    this.watchdogCache = null;
+    const text = this.writeWatchdog(current.text, values);
+    if (text === current.text) return {...current, ...values, changed: false};
+    await this.request('/contents/.github/workflows/watchdog.yml', 'PUT',
+      {branch: this.branch || 'main', message: `Set wxread watchdog to ${values.enabled ? `daily Beijing ${String(values.hour).padStart(2, '0')}:${String(values.minute).padStart(2, '0')}` : 'disabled'}`,
+       content: this.b64(sodium.from_string(text)), sha: current.file});
+    this.watchdogCache = this.readWatchdogText(text, current.file);
+    return {...this.watchdogCache, changed: true};
+  }
   async checkScheduledRun() {
     if(!this.connected) throw this.error('请先连接 GitHub 仓库','AUTHENTICATION');
     if(!this.data) throw this.error('账户状态尚未就绪，请稍后重试','NETWORK',true);
@@ -279,6 +321,9 @@ class GitHubClient {
     const scheduled=recent.filter(r=>r.event==='schedule');
     const succeeded=scheduled.find(r=>r.conclusion==='success');
     if(succeeded) return {kind:'ok',run:succeeded,start,fallback};
+    // 本周期已有一次手动运行或上一轮补跑成功，时长已经刷上，不再重复触发。
+    const done=recent.find(r=>r.event!=='schedule' && r.conclusion==='success');
+    if(done) return {kind:'skipped',run:done,start,fallback};
     if(from!==null && now-from<30*60*1000) return {kind:'waiting',start,fallback};
     const result=await this.run();
     return {kind:'rerun',result,start,fallback,attempts:scheduled.length};

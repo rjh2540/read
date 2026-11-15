@@ -25,6 +25,7 @@ async function api(path, method = 'GET', body = {}) {
     match=path.match(/^\/login\/([a-f0-9]{32})$/);
     if(match)return method==='DELETE'?await client.cancel(match[1]):await client.state(match[1]);
     if(path==='/settings/schedule')return await client.command('schedule',{enabled:body.enabled});
+    if(path==='/settings/watchdog')return await client.saveWatchdog({enabled:body.enabled,hour:Number(body.hour),minute:Number(body.minute)});
     if(path==='/settings/email')return await client.command('email',body);
     if(path==='/settings/email/test')return await client.command('test-email',body);
     if(path==='/settings/notifications')return await client.command('notifications',body);
@@ -40,8 +41,29 @@ function checkRunMessage(info) {
   if(info.kind==='ok') return '定时任务本周期已成功运行，无需补跑';
   if(info.kind==='running') return '本次定时任务仍在排队或运行中，暂未补跑';
   if(info.kind==='waiting') return '刚过定时时间，GitHub 可能还在排队，请稍后再检测';
+  if(info.kind==='skipped') return '本周期已有一次运行成功（手动或补跑），时长已刷上，不再补跑';
   if(info.kind==='disabled') return '自动阅读计划已暂停，未执行检测';
   return '本周期未找到成功运行，已自动补跑一次';
+}
+let watchdog=null, watchdogVersion=0;
+function watchdogBody() {
+  if(!watchdog) return '<div class="settings-status">正在读取自动检测设置…</div>';
+  if(watchdog.error) return `<div class="settings-status">${esc(watchdog.error)}</div>
+    <label class="toggle-label"><span>开启每日自动检测</span><input name="enabled" type="checkbox" class="switch"></label>
+    <div class="form-row"><label>每天检查（小时，北京时间）<input name="hour" type="number" min="0" max="23" step="1" value="12"></label><label>分钟<input name="minute" type="number" min="0" max="59" step="1" value="7"></label></div>
+    <div class="settings-status">修复配置后可在此保存检查时间。</div><button class="button primary">保存</button>`;
+  const hh=String(watchdog.hour).padStart(2,'0'), mm=String(watchdog.minute).padStart(2,'0');
+  return `<label class="toggle-label"><span>开启每日自动检测</span><input name="enabled" type="checkbox" class="switch" ${watchdog.enabled?'checked':''}></label>
+    <div class="form-row"><label>每天检查（小时，北京时间）<input name="hour" type="number" min="0" max="23" step="1" value="${hh}"></label><label>分钟<input name="minute" type="number" min="0" max="59" step="1" value="${mm}"></label></div>
+    <div class="settings-status">每天北京时间 ${hh}:${mm} 自动检查定时阅读是否成功；未运行或失败会自动补跑一次并发通知。</div>
+    <button class="button primary">保存</button>`;
+}
+async function loadWatchdog(force=false) {
+  const version=++watchdogVersion;
+  try{watchdog=await window.githubClient.loadWatchdog(force);}
+  catch(error){watchdog={error:(error.code==='CONFIGURATION'?error.message:'未能读取检测设置。请确认仓库默认分支已包含 .github/workflows/watchdog.yml。')};}
+  if(version!==watchdogVersion) return;
+  const form=$('#watchdog-form');if(form)form.innerHTML=watchdogBody();
 }
 function checkRunSummary() {
   if(!checkRunResult) return '';
@@ -50,6 +72,7 @@ function checkRunSummary() {
   if(info.kind==='ok') return `<div class="summary-row"><span>最近检测</span>${badge('success','运行正常')}${icon('check')}</div><div class="settings-status">定时任务在 ${dateTime(info.run.created_at)} 已成功结束，无需补跑。</div>`;
   if(info.kind==='running') return `<div class="summary-row"><span>最近检测</span>${badge('running','正在运行')}${icon('clock')}</div><div class="settings-status">本次定时任务仍在 GitHub 排队或运行中，${esc(runLabel(info.run))}，暂未补跑。</div>`;
   if(info.kind==='waiting') return `<div class="summary-row"><span>最近检测</span>${badge('cancelled','等待触发')}${icon('clock')}</div><div class="settings-status">刚过定时时间，GitHub 还在排队，请几分钟后再检测。</div>`;
+  if(info.kind==='skipped') return `<div class="summary-row"><span>最近检测</span>${badge('success','已有成功记录')}${icon('check')}</div><div class="settings-status">本周期在北京时间 ${dateTime(info.run.created_at)} 有一次运行成功（手动触发或上一轮补跑），时长已刷上，不再补跑。</div>`;
   if(info.kind==='rerun') return `<div class="summary-row"><span>最近检测</span>${badge('warning','已自动补跑')}${icon('play')}</div><div class="settings-status">本周期未找到成功的运行记录${info.attempts?`（共 ${info.attempts} 次尝试${info.fallback?'，暂按最近 24 小时判断':''}）`:'，且尚未有运行记录'}，已自动重新发起一次任务${info.result?.started?.length?`，覆盖 ${info.result.started.length} 个账户`:''}。</div>`;
   return '';
 }
@@ -93,6 +116,10 @@ function renderSettings() {
           <div class="settings-status">下次：${s.enabled?dateTime(data.next_run):'已暂停'}</div>
         </form>
       </section>
+      <section class="panel">
+        <div class="panel-head"><h2>自动检测</h2>${icon('shield')}</div>
+        <form id="watchdog-form" class="settings-body">${watchdogBody()}</form>
+      </section>
       <div class="notification-settings">
         <details class="panel notification-panel" ${e.enabled?'open':''}>
           <summary class="panel-head"><h2>邮件通知<span>${e.enabled?'已开启':'未开启'}</span></h2>${icon('arrow')}</summary>
@@ -111,6 +138,7 @@ function renderSettings() {
         ${notificationCards(data.notifications)}
       </div>
     </div>`;
+  if(!watchdog) loadWatchdog();
 }
 function render() {if(!data) return;$('#nav-count').textContent=data.accounts.length;$('#breadcrumb').textContent=labels[view];$$('[data-view].nav-item').forEach(b=>b.classList.toggle('active',b.dataset.view===view));({overview:renderOverview,accounts:renderAccounts,history:renderHistory,settings:renderSettings})[view]();}
 function setView(next) {view=next;render();window.scrollTo({top:0});}
@@ -231,6 +259,7 @@ document.addEventListener('submit',async e=>{
     }
     if(formId==='edit-form'){await api('/accounts/'+f.elements.id.value,'PATCH',{name:f.elements.name.value,read_num:Number(f.elements.minutes.value)*2,email:f.elements.email.value,enabled:f.elements.enabled.checked});$('#edit-dialog').close();toast('账户设置已保存');await refresh(true);}
     if(formId==='schedule-form'){await api('/settings/schedule','PUT',{enabled:f.elements.enabled.checked,cron:f.elements.cron.value,timezone:f.elements.timezone.value});await refresh(true);toast('阅读计划已保存');}
+    if(formId==='watchdog-form'){const hour=Number(f.elements.hour.value), minute=Number(f.elements.minute.value);if(!(hour>=0&&hour<=23) || !(minute>=0&&minute<=59) || hour%1 || minute%1)throw new Error('检查时间需为 0-23 的时和 0-59 的分');const saved=await api('/settings/watchdog','PUT',{enabled:f.elements.enabled.checked,hour,minute});watchdog={...watchdog,...saved};f.innerHTML=watchdogBody();await refresh(true);toast(saved.changed?(saved.enabled?`已设置为每天北京时间 ${String(hour).padStart(2,'0')}:${String(minute).padStart(2,'0')} 自动检测`:'自动检测已关闭，定时文件已停用'):'设置已是最新，无需保存');}
     if(formId==='email-form'){await api('/settings/email','PUT',emailValues());await refresh(true);toast('邮件设置已保存');}
     if(f.dataset.notificationChannel){await api('/settings/notifications','PUT',notificationValues(f));await refresh(true);toast(notificationLabels[f.dataset.notificationChannel]+' 通知设置已保存');}
   }catch(err){if(formId==='bind-form' && version!==bindVersion)return;const target={ 'bind-form':'#bind-error','edit-form':'#edit-error','auth-form':'#auth-error','email-form':'#email-result'}[formId]||(f.dataset.notificationChannel?'#notification-result-'+f.dataset.notificationChannel:null);if(target)$(target).textContent=err.message;else toast(err.message,true);}

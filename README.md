@@ -11,6 +11,7 @@ Pages 只托管 `pages/` 中的 HTML、CSS 和 JavaScript。页面通过 GitHub 
 - **多账户管理**：微信扫码绑定、cURL 导入、重新绑定、独立目标时长和通知邮箱。
 - **阅读总览与任务记录**：查看账户状态、最近七天记录、任务进度、成功或失败结果；支持手动运行和停止本批任务。
 - **计划与多渠道通知**：定时阅读开关，邮件、PushPlus、WxPusher、Telegram、Server酱，以及企业微信、飞书、钉钉和通用 JSON Webhook；渠道可同时启用、分别测试。
+- **自动检测与补跑**：独立工作流每天在你设定的时间检查定时阅读是否真的成功；未触发或失败时自动补跑一次并发送通知，检查时间可在「计划与通知」里直接设置。
 - **连接恢复与加密状态**：可选记住登录 7 天，支持关闭页面后恢复；网络波动自动重试，账户凭据与通知密钥加密保存。
 
 ## 快速使用
@@ -116,6 +117,17 @@ GitHub 定时工作流可能延迟，长期无仓库活动时还可能停用，�
 
 时长由脚本按成功阅读请求计算，不是从微信读书排行榜拉取的官方统计。运行状态和通知依赖第三方接口及 GitHub Actions 的可用性。
 
+## 自动检测与补跑
+
+GitHub 的定时任务偶尔会因为资源不足、排队超时等原因没有运行或中途失败，导致当天没有阅读时长。仓库额外提供了一个独立的检测工作流 `.github/workflows/watchdog.yml`：
+
+- **检查时间自由设置**：默认北京时间每天 12:07。在页面「计划与通知」→「自动检测」选择开关和时间并保存，会直接写回该文件的 `schedule`。文件里的 cron 按 **UTC** 执行（北京时间 = UTC + 8），页面保存时自动换算。
+- **判定规则**：只认最近一次定时触发之后的运行记录。已有成功的定时运行、或本周期已有手动运行成功，都不会重复补跑；仍有任务排队或运行时也只等待。刚过定时时间半小时内视为 GitHub 排队，不补跑。
+- **补跑方式**：确认失败或没有任何记录后，触发一次原有的阅读工作流（等同「运行全部」），并通过已开启的通知渠道告知结果。自动阅读计划处于暂停时不会补跑。
+- **失败可见**：检测本身出错会返回非零状态，可在 Actions 记录中看到；关闭自动检测只是把 `schedule` 整块注释，文件仍可手动触发。
+
+页面顶部的 **「检测运行」** 按钮是同一条规则的即时版：无需等待定时任务，点一下立即检查，未成功就当场补跑，结论显示在总览的「定时阅读」卡片里。检测时间改动后两者都会自动跟随，无需另外配置。
+
 ## 消息通知
 
 页面「计划与通知」支持 **邮件、PushPlus、WxPusher、Telegram、Server酱、Webhook**。点击渠道标题展开设置，每个渠道都有独立开关、保存和测试按钮。可以同时开启多个渠道：所有开启的渠道分别发送每个账户的完成或失败结果；一个渠道失败不阻止其他渠道，运行记录会标出未送达的渠道。
@@ -199,6 +211,8 @@ SMTP 授权码加密保存，页面读取设置时只返回「是否已保存授
 | `.github/workflows/pages.yml` | 发布页面 |
 | `.github/workflows/control.yml` | 扫码、设置和测试邮件 |
 | `.github/workflows/deploy.yml` | 定时或手动阅读 |
+| `.github/workflows/watchdog.yml` | 自动检测阅读是否成功并补跑 |
+| `watchdog.py` | 检测判定、触发补跑与结果通知 |
 | `github_worker.py` | Actions 执行业务操作 |
 | `github_state.py` | 加密状态和 GitHub API |
 | `notifications.py` | 原有通知渠道、多渠道发送、Webhook 格式与签名 |
@@ -210,6 +224,9 @@ python -m unittest discover -s tests -v
 node tests/test_github_client.cjs
 node tests/test_github_session.cjs
 node tests/test_pages_polling.cjs
+node tests/test_check_scheduled_run.cjs
+node tests/test_watchdog_settings.cjs
+python -m unittest tests.test_watchdog -v
 ```
 
 浏览器预览静态界面可用任意静态文件服务器。生产使用 GitHub Pages，不需要运行 `web.py`、`scheduler.py` 或 Docker。
