@@ -1,0 +1,70 @@
+name: Pages account control
+run-name: 'wxread-control ${{ inputs.session_id }}'
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        type: choice
+        options: [inspect, qr, import, update, delete, schedule, email, test-email, notifications, test-notification]
+        required: true
+      session_id:
+        required: true
+        type: string
+      public_key:
+        required: true
+        type: string
+      payload:
+        description: Encrypted command; never paste plaintext credentials
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: wxread-control-${{ inputs.operation == 'qr' && inputs.session_id || 'settings' }}
+  cancel-in-progress: false
+
+jobs:
+  control:
+    runs-on: ubuntu-24.04
+    environment: AutoRead
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-actions.txt
+      - run: pip install --disable-pip-version-check -r requirements-actions.txt
+      - name: Run encrypted Pages command
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WXREAD_CONTROL_KEY: ${{ secrets.WXREAD_CONTROL_KEY }}
+          WXREAD_ACCOUNTS_JSON: ${{ secrets.WXREAD_ACCOUNTS_JSON }}
+          WXREAD_CURL_BASH: ${{ secrets.WXREAD_CURL_BASH }}
+          CONTROL_OPERATION: ${{ inputs.operation }}
+          CONTROL_SESSION: ${{ inputs.session_id }}
+          CONTROL_PUBLIC_KEY: ${{ inputs.public_key }}
+          CONTROL_PAYLOAD: ${{ inputs.payload }}
+          PLAYWRIGHT_CHANNEL: chrome
+          PUSH_METHOD: ${{ secrets.PUSH_METHOD }}
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+          WXPUSHER_SPT: ${{ secrets.WXPUSHER_SPT }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SERVERCHAN_SPT: ${{ secrets.SERVERCHAN_SPT }}
+          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          WEBHOOK_HEADERS: ${{ secrets.WEBHOOK_HEADERS }}
+          WEBHOOK_TYPE: ${{ vars.WEBHOOK_TYPE }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ vars.SMTP_PORT }}
+          SMTP_SECURITY: ${{ vars.SMTP_SECURITY }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          SMTP_FROM: ${{ secrets.SMTP_FROM }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: python github_worker.py control

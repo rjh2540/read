@@ -1,0 +1,17 @@
+# Python cache files
+__pycache__/
+*.pyc
+
+# Log files
+logs/
+*.log
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Local runtime and encrypted account database (including its encryption key)
+.venv/
+data/
+playwright/.auth/
