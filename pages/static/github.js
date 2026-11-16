@@ -1,7 +1,7 @@
 /* GitHub-only control plane. Browser credential storage requires explicit opt-in. */
 'use strict';
 class GitHubClient {
-  constructor() { this.token='';this.repository='';this.branch='';this.pair=null;this.clientId='';this.commands=new Map();this.data=null;this.pendingReading=null;this.sessionVersion=0;this.retryAt=0;this.remember=false;this.sessionExpires=0;this.registeredAt=0;this.renewal=null;this.storageKind='session';this.requestCache=new Map();this.inflight=new Map();this.requestQueue=Promise.resolve();this.watchdogCache=null; }
+  constructor() { this.token='';this.repository='';this.branch='';this.pair=null;this.clientId='';this.commands=new Map();this.data=null;this.pendingReading=null;this.sessionVersion=0;this.retryAt=0;this.remember=false;this.sessionExpires=0;this.registeredAt=0;this.renewal=null;this.storageKind='session';this.requestCache=new Map();this.inflight=new Map();this.requestQueue=Promise.resolve();this.watchdogCache=null;this.scheduleCache=null; }
   get connected() {return Boolean(this.token && this.pair && this.branch);}
   id() {return crypto.randomUUID().replaceAll('-','');}
   b64(value) {return sodium.to_base64(value,sodium.base64_variants.ORIGINAL);}
@@ -299,6 +299,72 @@ class GitHubClient {
     this.watchdogCache = this.readWatchdogText(text, current.file);
     return {...this.watchdogCache, changed: true};
   }
+  pad(value) {return String(value).padStart(2, '0');}
+  // 解析“每天固定时刻”的 cron；逗号或复杂写法返回 null，避免误换算。
+  dailyCronTime(cron) {
+    const parts = String(cron || '').trim().split(/\s+/);
+    if (parts.length !== 5 || parts[2] !== '*' || parts[3] !== '*' || parts[4] !== '*') return null;
+    if (!/^\d+$/.test(parts[0]) || !/^\d+$/.test(parts[1])) return null;
+    const minute = Number(parts[0]), hour = Number(parts[1]);
+    return minute <= 59 && hour <= 23 ? {minute, hour} : null;
+  }
+  // 列出 deploy.yml 中所有 cron 行（含被注释的时段），记录行号、注释状态与原有格式。
+  scheduleRows(text) {
+    const rows = [];
+    text.split('\n').forEach((line, index) => {
+      const match = line.match(/^([ \t]*)(#[ \t]*)?- cron:[ \t]*(['"])([^'"]+)\3[ \t]*(\r?)$/);
+      if (match) rows.push({index, indent: match[1], comment: match[2] || '', quote: match[3], cron: match[4], crlf: match[5]});
+    });
+    return rows;
+  }
+  // 阅读执行时间保存在 deploy.yml；仓库按 UTC 存储，界面按北京时间编辑。
+  readScheduleText(text, sha) {
+    const rows = this.scheduleRows(text);
+    const active = rows.find(row => !row.comment);
+    const chosen = active || rows[0];
+    if (!chosen) throw this.error('未能识别执行时间配置，请确认 deploy.yml 的 schedule 下存在 cron 行', 'CONFIGURATION');
+    const time = this.dailyCronTime(chosen.cron);
+    return {utcCron: chosen.cron, supported: Boolean(time), active: Boolean(active),
+            hour: time ? (time.hour + 8) % 24 : null, minute: time ? time.minute : null, file: sha, text};
+  }
+  async fetchSchedule() {
+    const file = await this.request('/contents/.github/workflows/deploy.yml?ref=' + encodeURIComponent(this.branch || 'main'));
+    return this.readScheduleText(sodium.to_string(this.bytes(file.content.replace(/\s/g, ''))), file.sha);
+  }
+  async loadSchedule(force = false) {
+    if (this.scheduleCache && !force) return this.scheduleCache;
+    return this.scheduleCache = await this.fetchSchedule();
+  }
+  // 只改第一个生效时段；全部被注释时启用第一个时段。缩进、引号与换行符原样保留。
+  writeSchedule(text, values) {
+    const rows = this.scheduleRows(text);
+    if (!rows.length) throw this.error('未能定位执行时间配置，已放弃保存以免损坏工作流文件', 'CONFIGURATION');
+    const target = rows.find(row => !row.comment) || rows[0];
+    if (!this.dailyCronTime(target.cron)) throw this.error('当前执行时间不是每天固定时刻的写法，页面无法安全换算，请先到 GitHub 调整', 'CONFIGURATION');
+    const cron = this.toUtcCron(values.hour, values.minute);
+    // cron 顺序是“分 时 * * *”，注释里要按“UTC 时:分”显示，故按位置取分钟、小时。
+    const [utcMinute, utcHour] = cron.split(/\s+/);
+    const lines = text.split('\n');
+    lines[target.index] = `${target.indent}- cron: ${target.quote}${cron}${target.quote}${target.crlf}`;
+    // 紧邻上一行的说明若写明了北京时间，只替换其中的时刻，保留其余文字。
+    const above = lines[target.index - 1];
+    if (above !== undefined && /北京时间每天 \d{1,2}:\d{2}（[^）]*）/.test(above)) {
+      lines[target.index - 1] = above.replace(/北京时间每天 \d{1,2}:\d{2}（[^）]*）/,
+        `北京时间每天 ${this.pad(values.hour)}:${this.pad(values.minute)}（UTC ${this.pad(utcHour)}:${this.pad(utcMinute)}${Number(values.hour) < 8 ? '，前一天' : ''}）`);
+    }
+    return {text: lines.join('\n'), activated: Boolean(target.comment)};
+  }
+  async saveSchedule(values) {
+    const current = await this.fetchSchedule();
+    this.scheduleCache = null;
+    const written = this.writeSchedule(current.text, values);
+    if (written.text === current.text) return {...current, changed: false, activated: false};
+    await this.request('/contents/.github/workflows/deploy.yml', 'PUT',
+      {branch: this.branch || 'main', message: `Set wxread reading time to Beijing ${this.pad(values.hour)}:${this.pad(values.minute)}`,
+       content: this.b64(sodium.from_string(written.text)), sha: current.file});
+    this.scheduleCache = this.readScheduleText(written.text, current.file);
+    return {...this.scheduleCache, changed: true, activated: written.activated};
+  }
   async checkScheduledRun() {
     if(!this.connected) throw this.error('请先连接 GitHub 仓库','AUTHENTICATION');
     if(!this.data) throw this.error('账户状态尚未就绪，请稍后重试','NETWORK',true);
@@ -328,7 +394,7 @@ class GitHubClient {
     const result=await this.run();
     return {kind:'rerun',result,start,fallback,attempts:scheduled.length};
   }
-  disconnect() {this.sessionVersion++;this.clearSavedSession();if(this.pair)sodium.memzero(this.pair.privateKey);this.token='';this.pair=null;this.branch='';this.data=null;this.pendingReading=null;this.commands.clear();this.remember=false;this.sessionExpires=0;this.registeredAt=0;this.retryAt=0;this.renewal=null;this.requestCache.clear();this.inflight.clear();this.requestQueue=Promise.resolve();}
+  disconnect() {this.sessionVersion++;this.clearSavedSession();if(this.pair)sodium.memzero(this.pair.privateKey);this.token='';this.pair=null;this.branch='';this.data=null;this.pendingReading=null;this.commands.clear();this.remember=false;this.sessionExpires=0;this.registeredAt=0;this.retryAt=0;this.renewal=null;this.requestCache.clear();this.inflight.clear();this.requestQueue=Promise.resolve();this.watchdogCache=null;this.scheduleCache=null;}
   url(path='') {return 'https://github.com/'+this.repository+path;}
 }
 window.githubClient=new GitHubClient();

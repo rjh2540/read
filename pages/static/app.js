@@ -24,7 +24,12 @@ async function api(path, method = 'GET', body = {}) {
     if(path==='/login')return {session_id:await client.start('qr',body)};
     match=path.match(/^\/login\/([a-f0-9]{32})$/);
     if(match)return method==='DELETE'?await client.cancel(match[1]):await client.state(match[1]);
-    if(path==='/settings/schedule')return await client.command('schedule',{enabled:body.enabled});
+    if(path==='/settings/schedule'){
+      // 时间填了才写回 deploy.yml；开关始终写加密状态。
+      const time=(body.hour==='' || body.minute==='' || body.hour==null)?null:await client.saveSchedule({hour:Number(body.hour),minute:Number(body.minute)});
+      await client.command('schedule',{enabled:body.enabled});
+      return {time};
+    }
     if(path==='/settings/watchdog')return await client.saveWatchdog({enabled:body.enabled,hour:Number(body.hour),minute:Number(body.minute)});
     if(path==='/settings/email')return await client.command('email',body);
     if(path==='/settings/email/test')return await client.command('test-email',body);
@@ -46,6 +51,22 @@ function checkRunMessage(info) {
   return '本周期未找到成功运行，已自动补跑一次';
 }
 let watchdog=null, watchdogVersion=0;
+let readingTime=null, readingVersion=0;
+// 阅读执行时间面板状态：读取中、损坏、复杂写法分别给出禁用与提示。
+function readingTimeState() {
+  if(!readingTime) return {blocked:true,hour:'',minute:'',hint:'正在读取仓库中的执行时间…'};
+  if(readingTime.error) return {blocked:true,hour:'',minute:'',hint:readingTime.error};
+  if(readingTime.supported===false) return {blocked:true,hour:'',minute:'',hint:`当前执行时间「${readingTime.utcCron}」不是每天固定时刻的写法，请先到 GitHub 调整后再用页面设置。`};
+  return {blocked:false,hour:readingTime.hour,minute:readingTime.minute,
+    hint:readingTime.active===false?`当前定时处于注释状态（UTC ${readingTime.utcCron}），保存时间会同时启用它。`:'填写每天执行的北京时间；两格留空则只保存开关、不改时间。'};
+}
+async function loadReadingTime(force=false) {
+  const version=++readingVersion;
+  try{readingTime=await window.githubClient.loadSchedule(force);}
+  catch(error){readingTime={error:(error.code==='CONFIGURATION'?error.message:'未能读取执行时间。请确认默认分支包含 .github/workflows/deploy.yml。')};}
+  if(version!==readingVersion || view!=='settings') return;
+  render();
+}
 function watchdogBody() {
   if(!watchdog) return '<div class="settings-status">正在读取自动检测设置…</div>';
   if(watchdog.error) return `<div class="settings-status">${esc(watchdog.error)}</div>
@@ -102,7 +123,7 @@ function historyTable(runs) {
 }
 function renderHistory() {const focused=document.activeElement?.id==='history-search', position=$('#history-search')?.selectionStart; const query=$('#history-search')?.value || '';$('#content').innerHTML=header('运行记录',false)+`<section class="panel"><div class="panel-head"><h2>运行记录<span>${data.runs.length} 条</span></h2><input id="history-search" class="search-input" placeholder="搜索账户或结果" aria-label="搜索运行记录" value="${esc(query)}"></div><div id="history-list">${historyTable(data.runs.filter(r=>`${r.account_name} ${r.message}`.includes(query)))}</div></section>`;if(focused){$('#history-search').focus();$('#history-search').setSelectionRange(position,position);}}
 function renderSettings() {
-  const s=data.schedule,e=data.email;
+  const s=data.schedule,e=data.email,r=readingTimeState();
   const scheduleUrl=window.githubClient.url('/edit/'+encodeURIComponent(window.githubClient.branch||'main')+'/.github/workflows/deploy.yml');
   $('#content').innerHTML=header('计划与通知',false)+`
     <div class="settings-layout">
@@ -110,8 +131,9 @@ function renderSettings() {
         <div class="panel-head"><h2>定时阅读</h2>${icon('clock')}</div>
         <form id="schedule-form" class="settings-body">
           <label class="toggle-label"><span>开启定时阅读</span><input name="enabled" type="checkbox" class="switch" ${s.enabled?'checked':''}></label>
-          <div class="form-row"><label>Cron 表达式<input name="cron" value="${esc(s.cron)}" readonly></label><label>时区<input name="timezone" value="UTC" readonly></label></div>
-          <a class="text-button schedule-link" href="${esc(scheduleUrl)}" target="_blank" rel="noopener noreferrer">修改执行时间 ↗</a>
+          <div class="form-row"><label>每天执行（小时，北京时间）<input name="hour" type="number" min="0" max="23" step="1" value="${esc(r.hour)}"${r.blocked?' disabled':''}></label><label>分钟<input name="minute" type="number" min="0" max="59" step="1" value="${esc(r.minute)}"${r.blocked?' disabled':''}></label></div>
+          <p class="settings-status">${esc(r.hint)}</p>
+          <a class="text-button schedule-link" href="${esc(scheduleUrl)}" target="_blank" rel="noopener noreferrer">在 GitHub 查看完整配置 ↗</a>
           <button class="button primary">保存</button>
           <div class="settings-status">下次：${s.enabled?dateTime(data.next_run):'已暂停'}</div>
         </form>
@@ -139,6 +161,7 @@ function renderSettings() {
       </div>
     </div>`;
   if(!watchdog) loadWatchdog();
+  if(!readingTime) loadReadingTime();
 }
 function render() {if(!data) return;$('#nav-count').textContent=data.accounts.length;$('#breadcrumb').textContent=labels[view];$$('[data-view].nav-item').forEach(b=>b.classList.toggle('active',b.dataset.view===view));({overview:renderOverview,accounts:renderAccounts,history:renderHistory,settings:renderSettings})[view]();}
 function setView(next) {view=next;render();window.scrollTo({top:0});}
@@ -258,7 +281,14 @@ document.addEventListener('submit',async e=>{
       }
     }
     if(formId==='edit-form'){await api('/accounts/'+f.elements.id.value,'PATCH',{name:f.elements.name.value,read_num:Number(f.elements.minutes.value)*2,email:f.elements.email.value,enabled:f.elements.enabled.checked});$('#edit-dialog').close();toast('账户设置已保存');await refresh(true);}
-    if(formId==='schedule-form'){await api('/settings/schedule','PUT',{enabled:f.elements.enabled.checked,cron:f.elements.cron.value,timezone:f.elements.timezone.value});await refresh(true);toast('阅读计划已保存');}
+    if(formId==='schedule-form'){
+      const hour=f.elements.hour.value.trim(), minute=f.elements.minute.value.trim();
+      if((hour==='')!==(minute===''))throw new Error('执行时间请同时填写小时和分钟，或两格都留空表示只保存开关');
+      if(hour!=='' && (!/^\d+$/.test(hour) || !/^\d+$/.test(minute) || Number(hour)>23 || Number(minute)>59))throw new Error('执行时间需为 0-23 的小时和 0-59 的分钟');
+      const result=await api('/settings/schedule','PUT',{enabled:f.elements.enabled.checked,hour,minute});
+      await loadReadingTime(true);await refresh(true);
+      toast(result.time&&result.time.changed?`执行时间已设为每天北京时间 ${String(result.time.hour).padStart(2,'0')}:${String(result.time.minute).padStart(2,'0')}${result.time.activated?'，并已启用被注释的定时配置':''}`:'阅读计划已保存');
+    }
     if(formId==='watchdog-form'){const hour=Number(f.elements.hour.value), minute=Number(f.elements.minute.value);if(!(hour>=0&&hour<=23) || !(minute>=0&&minute<=59) || hour%1 || minute%1)throw new Error('检查时间需为 0-23 的时和 0-59 的分');const saved=await api('/settings/watchdog','PUT',{enabled:f.elements.enabled.checked,hour,minute});watchdog={...watchdog,...saved};f.innerHTML=watchdogBody();await refresh(true);toast(saved.changed?(saved.enabled?`已设置为每天北京时间 ${String(hour).padStart(2,'0')}:${String(minute).padStart(2,'0')} 自动检测`:'自动检测已关闭，定时文件已停用'):'设置已是最新，无需保存');}
     if(formId==='email-form'){await api('/settings/email','PUT',emailValues());await refresh(true);toast('邮件设置已保存');}
     if(f.dataset.notificationChannel){await api('/settings/notifications','PUT',notificationValues(f));await refresh(true);toast(notificationLabels[f.dataset.notificationChannel]+' 通知设置已保存');}
@@ -266,11 +296,10 @@ document.addEventListener('submit',async e=>{
   finally {if(ownsBinding && bindBusy===version)bindBusy=null;if(submit && (formId!=='bind-form' || (version===bindVersion && bindBusy!==version && !(bindTab==='qr' && loginSession))))submit.disabled=false;}
 });
 document.addEventListener('input',e=>{if(e.target.id==='history-search'){$('#history-list').innerHTML=historyTable(data.runs.filter(r=>`${r.account_name} ${r.message}`.includes(e.target.value)));}});
-document.addEventListener('change',e=>{if(e.target.id==='schedule-preset' && e.target.value!=='custom')$('#schedule-form').elements.cron.value=e.target.value;});
 document.addEventListener('click',async e=>{if(e.target.closest('#test-email')){const b=$('#test-email');b.disabled=true;$('#email-result').textContent='正在发送测试邮件…';try{await api('/settings/email/test','POST',emailValues());$('#email-result').textContent='测试邮件已发送';toast('测试邮件已发送');}catch(err){$('#email-result').textContent=err.message;}finally{b.disabled=false;}}});
 $('#delete-account').addEventListener('click',()=>$('#confirm-dialog').showModal());
 $('#confirm-delete').addEventListener('click',async()=>{const b=$('#confirm-delete');b.disabled=true;try{await api('/accounts/'+$('#edit-form').elements.id.value,'DELETE');$('#confirm-dialog').close();$('#edit-dialog').close();toast('账户已移除');await refresh(true);}catch(e){toast(e.message,true);}finally{b.disabled=false;}});
-$('#logout').addEventListener('click',async()=>{await api('/logout','POST',{});pausePolling();data=null;$('#content').innerHTML='<div class="loading">请连接仓库</div>';openAuth();});
+$('#logout').addEventListener('click',async()=>{await api('/logout','POST',{});pausePolling();data=null;watchdog=null;readingTime=null;$('#content').innerHTML='<div class="loading">请连接仓库</div>';openAuth();});
 $('#bind-dialog').addEventListener('close',()=>{if(!$('#bind-dialog').open){bindVersion++;closeQR();}});
 $('#today-label').textContent=new Date().toLocaleDateString('zh-CN',{timeZone:'Asia/Shanghai',month:'long',day:'numeric',weekday:'long'});
 (async()=>{try{await sodium.ready;$('#connection').textContent='正在恢复连接';await window.githubClient.restore();if(!window.githubClient.connected){$('#connection').textContent='尚未连接';openAuth();return;}$('#logout').hidden=false;await refresh(true);startPolling();}catch(e){if(window.githubClient.connected){$('#logout').hidden=false;await refresh(true);startPolling();}else{$('#connection').textContent='需要重新连接';openAuth(e.message);}}})();

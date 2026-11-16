@@ -101,7 +101,7 @@ GitHub 插件的连接授权与 Web 后台的 Token 是两套独立登录状态�
 
 默认时间为 **北京时间每天 01:07**，GitHub 的 Cron 为 UTC `7 17 * * *`。可在页面「计划与通知」启停自动计划；手动运行仍可使用。
 
-改变时间请编辑 `.github/workflows/deploy.yml` 的 `schedule`，例如：
+改执行时间直接在页面「计划与通知」→「定时阅读」填写每天的小时和分钟（北京时间）并保存即可，会自动换算成 UTC 写回 `.github/workflows/deploy.yml` 的 `schedule`，无需手动改代码。若只想改开关，两格留空即可。也可继续手动编辑文件，例如：
 
 ```yaml
 on:
