@@ -17,7 +17,10 @@ class CronParse(unittest.TestCase):
                          ['25 19 * * *'])
 
     def test_workflow_file_cron(self):
-        self.assertEqual(watchdog.cron_lines(), ['25 19 * * *'])
+        # 不硬编码具体时刻：用户可在页面随时修改执行时间，这里只校验恰好解析出一条生效的每日 cron。
+        lines = watchdog.cron_lines()
+        self.assertEqual(len(lines), 1)
+        self.assertRegex(lines[0], r'^\d{1,2} \d{1,2} \* \* \*$')
 
     def test_last_fire_is_most_recent_utc_slot(self):
         now = datetime(2026, 11, 15, 4, 0, tzinfo=timezone.utc)
@@ -43,7 +46,8 @@ class CronParse(unittest.TestCase):
 class Decide(unittest.TestCase):
     def setUp(self):
         self.since = datetime(2026, 11, 14, 19, 25, tzinfo=timezone.utc)
-        self.now = datetime(2026, 11, 15, 4, 7, tzinfo=timezone.utc)
+        # 默认基准超过 11 小时的“无记录等待期”，让补跑用例走完整判定。
+        self.now = datetime(2026, 11, 15, 8, 0, tzinfo=timezone.utc)
 
     def decide(self, runs):
         return watchdog.decide(runs, self.since, self.now)

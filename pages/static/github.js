@@ -391,6 +391,9 @@ class GitHubClient {
     const done=recent.find(r=>r.event!=='schedule' && r.conclusion==='success');
     if(done) return {kind:'skipped',run:done,start,fallback};
     if(from!==null && now-from<30*60*1000) return {kind:'waiting',start,fallback};
+    // 周期内一条记录都没有：GitHub 的 schedule 触发实测可延迟数小时，先多等一段时间，
+    // 立刻补跑反而会和之后迟到的定时任务重复执行。与 watchdog.py 的 MISSING_RUN_WAIT_SECONDS 一致。
+    if(from!==null && !recent.length && now-from<11*3600*1000) return {kind:'delayed',start,fallback};
     const result=await this.run();
     return {kind:'rerun',result,start,fallback,attempts:scheduled.length};
   }

@@ -15,6 +15,9 @@ import requests
 WORKFLOW = 'deploy.yml'
 CRON_LINE = re.compile(r"^\s*- cron:\s*['\"]([^'\"]+)['\"]", re.M)
 GRACE_SECONDS = 30 * 60
+# GitHub 的 schedule 触发经常延迟数小时（实测过 10 小时）。周期内一条记录都没有时，
+# 与其立刻补跑（会和迟到的定时任务重复执行），不如先等这个时长；超时才认为调度确实丢了。
+MISSING_RUN_WAIT_SECONDS = 11 * 3600
 REQUEST_TIMEOUT = (10, 30)
 
 
@@ -94,6 +97,11 @@ def decide(runs, since, now=None):
                 'message': '本周期已有一次成功运行（手动触发或此前补跑），时长已刷上，不补跑'}
     if (now - since).total_seconds() < GRACE_SECONDS:
         return {'action': 'waiting', 'message': '刚过定时时间，GitHub 可能还在排队，本次不补跑'}
+    # 周期内一条记录都没有：大概率是 GitHub 调度延迟（实测可迟到数小时）而非丢失。
+    # 此时补跑会和之后迟到的定时任务重复执行，所以多等一段时间，超时才认定调度确实没来。
+    if not recent and (now - since).total_seconds() < MISSING_RUN_WAIT_SECONDS:
+        return {'action': 'waiting', 'delayed': True,
+                'message': '本周期还没有任何运行记录，GitHub 定时触发可能延迟，本次不补跑'}
     return {'action': 'rerun', 'attempts': len(scheduled), 'unmatched': not scheduled,
             'message': (f'本周期定时任务共 {len(scheduled)} 次尝试均未成功' if scheduled
                         else '本周期没有找到定时任务运行记录')}

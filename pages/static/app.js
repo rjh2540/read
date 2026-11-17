@@ -46,6 +46,7 @@ function checkRunMessage(info) {
   if(info.kind==='ok') return '定时任务本周期已成功运行，无需补跑';
   if(info.kind==='running') return '本次定时任务仍在排队或运行中，暂未补跑';
   if(info.kind==='waiting') return '刚过定时时间，GitHub 可能还在排队，请稍后再检测';
+  if(info.kind==='delayed') return '本周期还没有运行记录，GitHub 定时触发可能有延迟，暂未补跑';
   if(info.kind==='skipped') return '本周期已有一次运行成功（手动或补跑），时长已刷上，不再补跑';
   if(info.kind==='disabled') return '自动阅读计划已暂停，未执行检测';
   return '本周期未找到成功运行，已自动补跑一次';
@@ -93,6 +94,7 @@ function checkRunSummary() {
   if(info.kind==='ok') return `<div class="summary-row"><span>最近检测</span>${badge('success','运行正常')}${icon('check')}</div><div class="settings-status">定时任务在 ${dateTime(info.run.created_at)} 已成功结束，无需补跑。</div>`;
   if(info.kind==='running') return `<div class="summary-row"><span>最近检测</span>${badge('running','正在运行')}${icon('clock')}</div><div class="settings-status">本次定时任务仍在 GitHub 排队或运行中，${esc(runLabel(info.run))}，暂未补跑。</div>`;
   if(info.kind==='waiting') return `<div class="summary-row"><span>最近检测</span>${badge('cancelled','等待触发')}${icon('clock')}</div><div class="settings-status">刚过定时时间，GitHub 还在排队，请几分钟后再检测。</div>`;
+  if(info.kind==='delayed') return `<div class="summary-row"><span>最近检测</span>${badge('cancelled','等待调度')}${icon('clock')}</div><div class="settings-status">本周期还没有任何运行记录。GitHub 的定时触发偶尔会延迟数小时（你的任务实际开始时间可能晚于设置时间），为避免和迟到的定时任务重复执行，检测会先等待，超时才补跑。</div>`;
   if(info.kind==='skipped') return `<div class="summary-row"><span>最近检测</span>${badge('success','已有成功记录')}${icon('check')}</div><div class="settings-status">本周期在北京时间 ${dateTime(info.run.created_at)} 有一次运行成功（手动触发或上一轮补跑），时长已刷上，不再补跑。</div>`;
   if(info.kind==='rerun') return `<div class="summary-row"><span>最近检测</span>${badge('warning','已自动补跑')}${icon('play')}</div><div class="settings-status">本周期未找到成功的运行记录${info.attempts?`（共 ${info.attempts} 次尝试${info.fallback?'，暂按最近 24 小时判断':''}）`:'，且尚未有运行记录'}，已自动重新发起一次任务${info.result?.started?.length?`，覆盖 ${info.result.started.length} 个账户`:''}。</div>`;
   return '';

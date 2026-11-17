@@ -42,12 +42,20 @@ async function main() {
   const scheduleAt = client.dailyCronStart('25 19 * * *', clock);
   assert.equal(scheduleAt, Date.UTC(2026, 10, 14, 19, 25), 'cron 25 19 * * * fires at 19:25 UTC');
 
-  // 定时窗口内还没有任何运行记录 → 触发一次补跑。
+  // 窗口内一条记录都没有：GitHub 调度可能延迟，先不补跑。
   workflow = DEPLOY;
   runs = [];
+  const beforeDelayed = dispatched;
   let info = await client.checkScheduledRun();
-  assert.equal(info.kind, 'rerun', 'missing scheduled run starts a manual rerun');
+  assert.equal(info.kind, 'delayed', 'an empty window waits for a possibly delayed schedule');
+  assert.equal(dispatched, beforeDelayed, 'delayed outcome must not dispatch a new run');
+
+  // 超过等待期仍无任何记录 → 认定调度丢失，触发补跑。
+  clock = Date.UTC(2026, 10, 15, 8, 0);
+  info = await client.checkScheduledRun();
+  assert.equal(info.kind, 'rerun', 'a stale empty window starts a manual rerun');
   assert.equal(info.attempts, 0, 'no previous schedule attempt counted');
+  clock = Date.UTC(2026, 10, 15, 4, 0);
 
   // 已成功 → 不补跑。
   runs = [run(1, 'schedule', 'completed', 'success', 8)];

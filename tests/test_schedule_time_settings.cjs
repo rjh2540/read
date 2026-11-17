@@ -34,12 +34,13 @@ client.request = async (urlPath, method = 'GET', body) => {
 };
 
 async function main() {
-  // 真实 deploy.yml：生效时段 19:25 UTC 应按北京时间 03:25 展示。
+  // 真实 deploy.yml：只校验能解析出生效时段且换算为合法北京时间，具体时刻随用户设置变化不钉死。
   use(REAL);
   const real = await client.loadSchedule(true);
   assert.equal(real.supported, true, '每天固定时刻可换算');
   assert.equal(real.active, true, '存在未注释的生效时段');
-  assert.equal(`${real.hour}:${real.minute}`, '3:25', 'UTC 19:25 换算为北京时间 03:25');
+  assert.ok(Number.isInteger(real.hour) && real.hour >= 0 && real.hour <= 23, '解析出合法北京时间小时');
+  assert.ok(Number.isInteger(real.minute) && real.minute >= 0 && real.minute <= 59, '解析出合法北京时间分钟');
 
   // 逐行识别：只有一个生效时段，其余注释时段都算进 rows 但不算 active。
   use(FIXTURE);
